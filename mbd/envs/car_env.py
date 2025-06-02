@@ -76,8 +76,8 @@ class CarEnv(PipelineEnv):
         sys = mjcf.load(xml_path)
         print(f"[CarEnv Debug] Parsed link_names: {list(sys.link_names)}")
         # print(f'system dt: {sys.dt}')
-        self.init_q = jnp.array([0.0, -1.6, 0.0]) # Initial position [x, y, z_angle]
-        self.target_q_xy = jnp.array([0.0, 1.6])     # Target XY position
+        self.init_q = jnp.array([0.0, -0.7, 0.0]) # Initial position [x, y, z_angle]
+        self.target_q_xy = jnp.array([0.0, 1.2])     # Target XY position
         self.target_q_rot_z = jnp.array([jnp.pi/2]) # Target Z rotation (example: 90 degrees)
 
         # Exact box dimensions from XML (half-extents)
@@ -101,7 +101,8 @@ class CarEnv(PipelineEnv):
         q = jnp.zeros(self.sys.nq).at[:3].set(self.init_q)
         qd = jnp.zeros(self.sys.qd_size())
         # reset vy to 3
-        # qd = qd.at[1].set(1)
+        qd = qd.at[1].set(1)
+        qd = qd.at[2].set(1)
 
         pipeline_state = self.pipeline_init(q, qd)
         obs = self._get_obs(pipeline_state)
@@ -113,9 +114,9 @@ class CarEnv(PipelineEnv):
 
     def step(self, state: State, action: jnp.ndarray) -> State:
         """Run one timestep of the environment's dynamics."""
-        jax.debug.print("[DEBUG] step: action={}, state.pipeline_state.qd={}", action, state.pipeline_state.qd)
+        # jax.debug.print("[DEBUG] step: action={}, state.pipeline_state.qd={}", action, state.pipeline_state.qd)
         pipeline_state = self.pipeline_step(state.pipeline_state, action)
-        jax.debug.print("[DEBUG] step: action={}, pipeline_state.qd={}", action, pipeline_state.qd)
+        # jax.debug.print("[DEBUG] step: action={}, pipeline_state.qd={}", action, pipeline_state.qd)
         obs = self._get_obs(pipeline_state)
         reward = self._get_reward(pipeline_state, action)
         done = self._get_done(pipeline_state)
@@ -225,7 +226,7 @@ class CarEnv(PipelineEnv):
         total_reward = (
             10.0 * reward_target_dist +      # Weight for distance
             10.0 * reward_target_orient +    # Weight for orientation
-            20.0 * obstacle_penalty +        # Weight for obstacle penalty
+            60.0 * obstacle_penalty +        # Weight for obstacle penalty
             10.0 * velocity_reward +          # Weight for velocity reward
             0.1 * ctrl_cost +                # Weight for control cost
             reward_alive
@@ -233,13 +234,13 @@ class CarEnv(PipelineEnv):
         
         # JAX-compatible debug: Print final reward
         # jax.debug.print("[DEBUG] total_reward: {}", obstacle_penalty)
-        jax.debug.print("target_dist: {reward_target_dist:.2f}, target_orient: {reward_target_orient:.2f}, obstacle_penalty: {obstacle_penalty:.2f}, velocity_reward: {velocity_reward:.2f}, ctrl_cost: {ctrl_cost:.2f}, reward_alive: {reward_alive:.2f}",
-                        reward_target_dist=reward_target_dist,
-                        reward_target_orient=reward_target_orient, 
-                        obstacle_penalty=obstacle_penalty,
-                        velocity_reward=velocity_reward,
-                        ctrl_cost=ctrl_cost,
-                        reward_alive=reward_alive)
+        # jax.debug.print("target_dist: {reward_target_dist:.2f}, target_orient: {reward_target_orient:.2f}, obstacle_penalty: {obstacle_penalty:.2f}, velocity_reward: {velocity_reward:.2f}, ctrl_cost: {ctrl_cost:.2f}, reward_alive: {reward_alive:.2f}",
+        #                 reward_target_dist=reward_target_dist,
+        #                 reward_target_orient=reward_target_orient, 
+        #                 obstacle_penalty=obstacle_penalty,
+        #                 velocity_reward=velocity_reward,
+        #                 ctrl_cost=ctrl_cost,
+        #                 reward_alive=reward_alive)
 
         return total_reward.astype(jnp.float32)
 
@@ -310,14 +311,14 @@ def main():
     print(f"Step 0: Obs: {state.obs}, Reward: {state.reward:.2f}, Done: {state.done}")
     # print qd
     jax.debug.print("[DEBUG] initial qd: {}", state.pipeline_state.qd)
-    for i in range(50): # Increased steps for testing
+    for i in range(5): # Increased steps for testing
         rng, rng_act = jax.random.split(rng)
         # Random actions for now to test dynamics
-        act = jnp.ones(env.action_size) * jnp.array([0, 0.1, 0.1])
+        act = jnp.ones(env.action_size) * jnp.array([0, 1.0, 1.0])
 
         state = env_step(state, act)
         rollout.append(state.pipeline_state)
-        print(f"Step {i}: Obs: {state.obs}, Reward: {state.reward:.2f}, Done: {state.done}")
+        # print(f"Step {i}: Obs: {state.obs}, Reward: {state.reward:.2f}, Done: {state.done}")
         jax.debug.print("[DEBUG] step: reward={}, done={}", state.reward, state.done)
         if state.done:
             print(f"Episode finished at step {i+1}. Reward: {state.reward:.2f}, Done: {state.done}")

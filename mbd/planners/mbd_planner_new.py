@@ -38,8 +38,8 @@ class Args:
     env_name: str = "car_env"
     # diffusion
     Nsample: int = 2048  # number of samples
-    Hsample: int = 80  # horizon of samples
-    Hnode: int = 16  # node number for control
+    Hsample: int = 200  # horizon of samples
+    Hnode: int = 20  # node number for control
     Ndiffuse: int = 10  # number of diffusion steps
     temp_sample: float = 0.1  # temperature for sampling
     horizon_diffuse_factor: float = 0.9  # factor to scale the sigma of horizon diffuse
