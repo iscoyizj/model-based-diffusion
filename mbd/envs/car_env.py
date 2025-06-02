@@ -172,7 +172,7 @@ class CarEnv(PipelineEnv):
         #                car_global_pos_xy, car_global_euler_z)
 
         # 1. Target Proximity Reward (dense reward)
-        dist_to_target_xy = jnp.linalg.norm(self.target_q_xy - car_global_pos_xy)
+        dist_to_target_xy = jnp.linalg.norm(self.target_q_xy - car_global_pos_xy[-1])
         reward_target_dist = -dist_to_target_xy
 
         # 2. Target Orientation Reward (dense reward) - using vectorized normalize_angle
@@ -228,7 +228,7 @@ class CarEnv(PipelineEnv):
             10.0 * reward_target_orient +    # Weight for orientation
             60.0 * obstacle_penalty +        # Weight for obstacle penalty
             10.0 * velocity_reward +          # Weight for velocity reward
-            0.1 * ctrl_cost +                # Weight for control cost
+            1.0 * ctrl_cost +                # Weight for control cost
             reward_alive
         )
         
