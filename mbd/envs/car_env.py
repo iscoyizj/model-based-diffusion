@@ -5,7 +5,7 @@ import brax
 from brax.envs.base import PipelineEnv, State
 from brax.generalized import pipeline
 from brax.io import html, mjcf
-from brax.math import quat_to_euler, euler_to_quat # For orientation calculations
+# Removed quat_to_euler import - using safe_quat_to_euler instead to avoid CUDA cusolver errors
 
 import mbd # For mbd.__path__[0]
 
@@ -20,6 +20,36 @@ TARGET_REACHED_THRESHOLD_ORI = 0.2  # Orientation threshold (radians) for reachi
 def normalize_angle(angle):
     """Normalize angle to [-pi, pi] range."""
     return (angle + jnp.pi) % (2 * jnp.pi) - jnp.pi
+
+
+@jax.jit
+def safe_quat_to_euler(quat):
+    """Safe quaternion to euler conversion that avoids CUDA cusolver errors."""
+    # Normalize quaternion to avoid numerical issues
+    quat_normalized = quat / jnp.linalg.norm(quat)
+    
+    # Extract quaternion components (w, x, y, z)
+    w, x, y, z = quat_normalized[3], quat_normalized[0], quat_normalized[1], quat_normalized[2]
+    
+    # Convert to Euler angles (roll, pitch, yaw) 
+    # Using a numerically stable implementation
+    # Roll (x-axis rotation)
+    sinr_cosp = 2 * (w * x + y * z)
+    cosr_cosp = 1 - 2 * (x * x + y * y)
+    roll = jnp.arctan2(sinr_cosp, cosr_cosp)
+    
+    # Pitch (y-axis rotation)
+    sinp = 2 * (w * y - z * x)
+    # Clamp to avoid numerical issues with arcsin
+    sinp = jnp.clip(sinp, -1.0, 1.0)
+    pitch = jnp.arcsin(sinp)
+    
+    # Yaw (z-axis rotation)
+    siny_cosp = 2 * (w * z + x * y)
+    cosy_cosp = 1 - 2 * (y * y + z * z)
+    yaw = jnp.arctan2(siny_cosp, cosy_cosp)
+    
+    return roll, pitch, yaw
 
 
 @jax.jit
@@ -138,7 +168,7 @@ class CarEnv(PipelineEnv):
         car_global_pos_xy = pipeline_state.x.pos[0, :2]
         # Car's global orientation (Z-axis Euler angle)
         car_global_rot_quat = pipeline_state.x.rot[0]
-        _, _, car_global_euler_z = quat_to_euler(car_global_rot_quat)
+        _, _, car_global_euler_z = safe_quat_to_euler(car_global_rot_quat)
 
         # Relative position to target
         rel_pos_to_target_xy = self.target_q_xy - car_global_pos_xy
@@ -165,14 +195,14 @@ class CarEnv(PipelineEnv):
         """Calculates the reward for the current state and action."""
         car_global_pos_xy = pipeline_state.x.pos[0, :2]
         car_global_rot_quat = pipeline_state.x.rot[0]
-        _, _, car_global_euler_z = quat_to_euler(car_global_rot_quat)
+        _, _, car_global_euler_z = safe_quat_to_euler(car_global_rot_quat)
 
         # JAX-compatible debug: Print inputs without conditional logic
         # jax.debug.print("[DEBUG] reward inputs: car_pos={}, car_rot={}", 
         #                car_global_pos_xy, car_global_euler_z)
 
         # 1. Target Proximity Reward (dense reward)
-        dist_to_target_xy = jnp.linalg.norm(self.target_q_xy - car_global_pos_xy[-1])
+        dist_to_target_xy = jnp.linalg.norm(self.target_q_xy - car_global_pos_xy)
         reward_target_dist = -dist_to_target_xy
 
         # 2. Target Orientation Reward (dense reward) - using vectorized normalize_angle
@@ -248,7 +278,7 @@ class CarEnv(PipelineEnv):
         """Checks if the episode is done."""
         car_global_pos_xy = pipeline_state.x.pos[0, :2]
         car_global_rot_quat = pipeline_state.x.rot[0]
-        _, _, car_global_euler_z = quat_to_euler(car_global_rot_quat)
+        _, _, car_global_euler_z = safe_quat_to_euler(car_global_rot_quat)
 
         # 1. Reached Target - using vectorized normalize_angle
         dist_to_target_xy = jnp.linalg.norm(self.target_q_xy - car_global_pos_xy)

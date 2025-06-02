@@ -11,6 +11,9 @@ import matplotlib.pyplot as plt
 from brax.io import html
 import scienceplots
 import mbd
+import numpy as np  # Added for Zarr
+import zarr  # Added for Zarr
+from jax import tree_util
 
 plt.style.use("science")
 
@@ -38,12 +41,16 @@ class Args:
     env_name: str = "car_env"
     # diffusion
     Nsample: int = 2048  # number of samples
-    Hsample: int = 200  # horizon of samples
+    Hsample: int = 50  # horizon of samples
     Hnode: int = 20  # node number for control
-    Ndiffuse: int = 10  # number of diffusion steps
+    Ndiffuse: int = 2  # number of diffusion steps
     temp_sample: float = 0.1  # temperature for sampling
     horizon_diffuse_factor: float = 0.9  # factor to scale the sigma of horizon diffuse
     traj_diffuse_factor: float = 0.5  # factor to scale the sigma of trajectory diffuse
+    # data saving
+    save_data: bool = True  # whether to save trajectory data
+    data_output_dir: str = "./results/mbd_data"  # directory to save data
+    max_trajectories_to_save: int = 100  # maximum number of best trajectories to save
 
 class MBDPI:
     def __init__(self, args: Args, env):
@@ -154,6 +161,112 @@ class MBDPI:
         return Y
 
 
+def save_trajectory_data(args: Args, rewss, pipeline_statess, us, state_init, env):
+    """Save trajectory data to Zarr format, similar to PPO data collection."""
+    if not args.save_data:
+        return
+    
+    print("Saving trajectory data to Zarr format...")
+    
+    # Create output directory
+    os.makedirs(args.data_output_dir, exist_ok=True)
+    
+    # Create Zarr file
+    zarr_file_path = os.path.join(args.data_output_dir, f"mbd_trajectories_{time.strftime('%Y%m%d_%H%M%S')}.zarr")
+    
+    try:
+        zroot = zarr.open_group(zarr_file_path, "w")
+        zdata = zroot.create_group("data")
+        zmeta = zroot.create_group("meta")
+        
+        # Determine dimensions
+        obs_dim = env.observation_size
+        action_dim = env.action_size
+        
+        print(f"Obs dim: {obs_dim}, Action dim: {action_dim}")
+        print(f"Rewards shape: {rewss.shape}, Pipeline states q shape: {pipeline_statess.q.shape}")
+        print(f"Actions shape: {us.shape}")
+        
+        # Select best trajectories based on mean reward
+        trajectory_rewards = rewss.mean(axis=1)  # Mean reward per trajectory
+        best_indices = jnp.argsort(trajectory_rewards)[-args.max_trajectories_to_save:]  # Top trajectories
+        
+        print(f"Selected {len(best_indices)} best trajectories out of {len(trajectory_rewards)} total")
+        print(f"Best trajectory rewards: {trajectory_rewards[best_indices]}")
+        
+        # Extract best trajectories
+        best_rewss = rewss[best_indices]  # Shape: (num_best, Hsample)
+        best_us = us[best_indices]  # Shape: (num_best, Hsample, action_dim)
+        
+        # Extract pipeline states for best trajectories
+        def extract_best_pipeline_states(x):
+            return x[best_indices]
+        best_pipeline_statess = tree_util.tree_map(extract_best_pipeline_states, pipeline_statess)
+        
+        # Convert to observations for each trajectory
+        best_obs_list = []
+        for traj_idx in range(len(best_indices)):
+            # Extract single trajectory pipeline states
+            def extract_single_trajectory(x):
+                return x[traj_idx]
+            single_traj_states = tree_util.tree_map(extract_single_trajectory, best_pipeline_statess)
+            
+            # Convert each timestep to observation
+            traj_obs = []
+            for t in range(single_traj_states.q.shape[0]):
+                def extract_timestep(x):
+                    return x[t]
+                timestep_state = tree_util.tree_map(extract_timestep, single_traj_states)
+                obs = env._get_obs(timestep_state)
+                traj_obs.append(obs)
+            
+            best_obs_list.append(jnp.stack(traj_obs))  # Shape: (Hsample, obs_dim)
+        
+        best_obs_array = jnp.stack(best_obs_list)  # Shape: (num_best, Hsample, obs_dim)
+        
+        # Flatten data for storage (similar to PPO approach)
+        # Reshape from (num_traj, horizon, dim) to (num_traj * horizon, dim)
+        num_best_trajectories = best_obs_array.shape[0]
+        horizon = best_obs_array.shape[1]
+        total_steps = num_best_trajectories * horizon
+        
+        flat_obs = best_obs_array.reshape(total_steps, obs_dim)
+        flat_actions = best_us.reshape(total_steps, action_dim)
+        flat_rewards = best_rewss.reshape(total_steps)
+        
+        # Convert to numpy for Zarr storage
+        flat_obs_np = np.array(flat_obs, dtype=np.float32)
+        flat_actions_np = np.array(flat_actions, dtype=np.float32)
+        flat_rewards_np = np.array(flat_rewards, dtype=np.float32)
+        
+        # Create Zarr datasets
+        zdata.create_dataset("state", data=flat_obs_np, dtype='float32')
+        zdata.create_dataset("action", data=flat_actions_np, dtype='float32')
+        zdata.create_dataset("reward", data=flat_rewards_np, dtype='float32')
+        
+        # Create episode end markers (end of each trajectory)
+        episode_ends = np.arange(horizon, total_steps + 1, horizon, dtype=np.int64)
+        zmeta.create_dataset("episode_ends", data=episode_ends, dtype='int64')
+        
+        # Save metadata
+        zmeta.attrs['num_trajectories'] = num_best_trajectories
+        zmeta.attrs['horizon'] = horizon
+        zmeta.attrs['obs_dim'] = obs_dim
+        zmeta.attrs['action_dim'] = action_dim
+        zmeta.attrs['env_name'] = args.env_name
+        zmeta.attrs['total_steps'] = total_steps
+        
+        print(f"Successfully saved {total_steps} steps from {num_best_trajectories} trajectories to {zarr_file_path}")
+        print(f"Episode end markers: {episode_ends.tolist()}")
+        print("Dataset structure:")
+        print(zroot.tree())
+        
+    except Exception as e:
+        print(f"Error saving trajectory data: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def main(args: Args):
     rng = jax.random.PRNGKey(seed=args.seed)
 
@@ -177,26 +290,6 @@ def main(args: Args):
     rollout = []
     state = state_init
     us = []
-    # with tqdm(range(Nstep), desc="Rollout") as pbar:
-    #     for t in pbar:
-    #         # forward single step
-    #         state = step_env(state, Y0[0])
-    #         rollout.append(state.pipeline_state)
-    #         rews.append(state.reward)
-    #         us.append(Y0[0])
-
-    #         # update Y0
-    #         Y0 = mbdpi.shift(Y0)
-
-    #         t0 = time.time()
-    #         for i in range(args.Ndiffuse):
-    #             rng, Y0, info = mbdpi.reverse_once(state, rng, Y0, mbdpi.sigma_control*(args.traj_diffuse_factor**i))
-    #         rews_plan.append(info["rews"].mean())
-    #         freq = 1 / (time.time() - t0)
-    #         pbar.set_postfix({"rew": f"{state.reward:.2e}", "freq": f"{freq:.2f}"})
-
-    # rew = jnp.array(rews).mean()
-    # print(f"mean reward = {rew:.2e}")
     
     Y0 = YN
     Ybars = []
@@ -205,38 +298,102 @@ def main(args: Args):
             rng, Y0, info = mbdpi.reverse_once(state_init, rng, Y0, mbdpi.sigma_control)
             Ybars.append(Y0)
             # Update the progress bar's suffix to show the current reward
-            # jax.debug.print("[DEBUG] state: {state.pipeline_state.x.pos[0, :2]}")
             pbar.set_postfix({"rew": f"{info['rews'].mean():.2e}"})
 
-
-    # webpage = html.render(env.sys.tree_replace({"opt.timestep": env.dt}), rollout)
-
-    us = mbdpi.node2u_vmap(Y0)
-    # # save us
-
-
-
-    # # plot rews_plan
-    # plt.plot(rews_plan)
-    # plt.savefig("./results/rews_plan.png")
-
-    # # host webpage with flask
-    render_us = functools.partial(
-        mbd.utils.render_us,
-        step_env,
-        env.sys.tree_replace({"opt.timestep": env.dt}),
+    # Convert the final optimized control nodes to action sequences
+    us_final = mbdpi.node2u_vmap(Y0)  # This gives us a single trajectory
+    
+    # But for data saving, we need all the sampled trajectories from the last diffusion step
+    # Let's run one more reverse_once to get all the sampled action sequences
+    print("Generating final sampled trajectories for data saving...")
+    rng, Y0_final, final_info = mbdpi.reverse_once(state_init, rng, Y0, mbdpi.sigma_control)
+    
+    # Now run rollout to get all trajectories
+    # We need to reconstruct the sampled Y0s from the last iteration
+    # Generate samples like in reverse_once
+    rng, Y0s_rng = jax.random.split(rng)
+    eps_Y = jax.random.normal(
+        Y0s_rng, (args.Nsample, args.Hnode + 1, mbdpi.nu)
     )
-    webpage = render_us(state_init, us)
-    path = f"{mbd.__path__[0]}/../results/{args.env_name}"
-    with open(f"{path}/rollout.html", "w") as f:
+    Y0s = eps_Y * mbdpi.sigma_control[None, :, None] + Y0
+    # append Y0s with Y0 to also evaluate Y0
+    Y0s = jnp.concatenate([Y0s, Y0[None]], axis=0)
+    Y0s = jnp.clip(Y0s, -1.0, 1.0)
+    
+    # Convert all control node sequences to action sequences
+    us = mbdpi.node2u_vvmap(Y0s)  # Shape: (Nsample+1, Hsample, action_dim)
+    
+    print(f"Generated action sequences with shape: {us.shape}")
+    print(f"Expected shape: ({args.Nsample + 1}, {args.Hsample}, {mbdpi.nu})")
+
+    # host webpage with flask
+    import flask
+
+    # esitimate mu_0tm1
+    rewss, pipeline_statess = mbdpi.rollout_us_vmap(state_init, us)
+    
+    print(f"After rollout - Rewards shape: {rewss.shape}, Expected: ({args.Nsample + 1}, {args.Hsample})")
+    print(f"After rollout - Pipeline states q shape: {pipeline_statess.q.shape}")
+    
+    # Check if environment is terminating early
+    # Let's check the done flags for the first trajectory
+    if hasattr(pipeline_statess, 'done'):
+        print(f"Done flags shape: {pipeline_statess.done.shape}")
+        first_traj_done = pipeline_statess.done[0]  # First trajectory
+        print(f"First trajectory done flags: {first_traj_done}")
+        print(f"Environment terminates at step: {jnp.argmax(first_traj_done) if jnp.any(first_traj_done) else 'Never'}")
+    
+    # Save trajectory data to Zarr
+    save_trajectory_data(args, rewss, pipeline_statess, us, state_init, env)
+    
+    # Select the best trajectory for visualization
+    # rewss shape: (Nsample+1, Hsample)
+    # pipeline_statess is a batched pipeline state with shape (Nsample+1, Hsample) for each attribute
+    
+    # Option 1: Select the trajectory with highest mean reward
+    trajectory_rewards = rewss.mean(axis=1)  # Mean reward per trajectory
+    best_trajectory_idx = jnp.argmax(trajectory_rewards)
+    
+    # Option 2: Use the last trajectory (which is the mean/reference trajectory)
+    # best_trajectory_idx = -1
+    
+    print(f"Selected trajectory {best_trajectory_idx} with mean reward: {trajectory_rewards[best_trajectory_idx]:.3f}")
+    print(f"Pipeline states type: {type(pipeline_statess)}")
+    print(f"Pipeline states q shape: {pipeline_statess.q.shape}")
+    print(f"Total samples evaluated: {len(trajectory_rewards)}")
+    
+    # Extract the best trajectory pipeline states using JAX tree operations
+    # We need to slice each component of the pipeline state
+    def extract_trajectory(x):
+        """Extract a single trajectory from batched data."""
+        return x[best_trajectory_idx]
+    
+    # Apply the extraction to the entire pipeline state tree
+    best_trajectory_pipeline_states = tree_util.tree_map(extract_trajectory, pipeline_statess)
+    
+    # Now convert to a list of individual pipeline states for each timestep
+    # best_trajectory_pipeline_states has shape (Hsample,) for each attribute
+    rollout = []
+    for t in range(best_trajectory_pipeline_states.q.shape[0]):  # Hsample timesteps
+        # Extract timestep t from the trajectory
+        def extract_timestep(x):
+            return x[t]
+        
+        timestep_state = tree_util.tree_map(extract_timestep, best_trajectory_pipeline_states)
+        rollout.append(timestep_state)
+    
+    print(f"Rollout length: {len(rollout)}")
+    print(f"First rollout state q shape: {rollout[0].q.shape}")
+    
+    app = flask.Flask(__name__)
+    webpage = html.render(env.sys.tree_replace({"opt.timestep": env.dt}), rollout)
+
+    # Save visualization to file for easy access
+    os.makedirs("./results", exist_ok=True)
+    with open("./results/car_env_diffusion_rollout.html", "w") as f:
         f.write(webpage)
-    rewss_final, _ = mbdpi.rollout_us(state_init, us)
+    print("Visualization saved to ./results/car_env_diffusion_rollout.html")
 
-    # @app.route("/")
-    # def index():
-    #     return webpage
-
-    # app.run(port=5000)
 
 
 if __name__ == "__main__":
