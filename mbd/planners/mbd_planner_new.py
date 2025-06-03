@@ -17,19 +17,21 @@ from jax import tree_util
 
 plt.style.use("science")
 
-# Tell XLA to use Triton GEMM, this improves steps/sec by ~30% on some GPUs
-xla_flags = os.environ.get("XLA_FLAGS", "")
-xla_flags += " --xla_gpu_triton_gemm_any=True"
-os.environ["XLA_FLAGS"] = xla_flags
+# # Tell XLA to use Triton GEMM, this improves steps/sec by ~30% on some GPUs
+# xla_flags = os.environ.get("XLA_FLAGS", "")
+# xla_flags += " --xla_gpu_triton_gemm_any=True"
+# os.environ["XLA_FLAGS"] = xla_flags
 
 
 def rollout_us(step_env, state, us):
     def step(state, u):
         state = step_env(state, u)
-        return state, (state.reward, state.pipeline_state)
+        return state, (state.reward, state.pipeline_state, state.obs)
 
-    _, (rews, pipline_states) = jax.lax.scan(step, state, us)
-    return rews, pipline_states
+    states, (rews, pipline_states, obs) = jax.lax.scan(step, state, us)
+    # jax.debug.print("[DEBUG] rollout_us: states.obs.shape={}", states.obs.shape)
+    # obs = states.obs
+    return rews, pipline_states, obs
 
 
 @dataclass
@@ -41,16 +43,16 @@ class Args:
     env_name: str = "car_env"
     # diffusion
     Nsample: int = 2048  # number of samples
-    Hsample: int = 50  # horizon of samples
-    Hnode: int = 20  # node number for control
-    Ndiffuse: int = 2  # number of diffusion steps
+    Hsample: int = 60  # horizon of samples
+    Hnode: int = 8  # node number for control
+    Ndiffuse: int = 9  # number of diffusion steps
     temp_sample: float = 0.1  # temperature for sampling
     horizon_diffuse_factor: float = 0.9  # factor to scale the sigma of horizon diffuse
     traj_diffuse_factor: float = 0.5  # factor to scale the sigma of trajectory diffuse
     # data saving
     save_data: bool = True  # whether to save trajectory data
-    data_output_dir: str = "./results/mbd_data"  # directory to save data
-    max_trajectories_to_save: int = 100  # maximum number of best trajectories to save
+    data_output_dir: str = "../results/"+env_name  # directory to save data
+    max_trajectories_to_save: int = 800  # maximum number of best trajectories to save
 
 class MBDPI:
     def __init__(self, args: Args, env):
@@ -110,7 +112,7 @@ class MBDPI:
         us = self.node2u_vvmap(Y0s)
 
         # esitimate mu_0tm1
-        rewss, pipeline_statess = self.rollout_us_vmap(state, us)
+        rewss, pipeline_statess, obs = self.rollout_us_vmap(state, us)
         rew_Ybar_i = rewss[-1].mean()
         qss = pipeline_statess.q
         qdss = pipeline_statess.qd
@@ -125,10 +127,10 @@ class MBDPI:
         xbar = jnp.einsum("n,nijk->ijk", weights, xss)
 
         info = {
-            "rews": rews,
-            "qbar": qbar,
-            "qdbar": qdbar,
-            "xbar": xbar,
+            "rews": rewss,
+            "obs": obs,
+            "pipeline_statess": pipeline_statess,
+            "us": us,
         }
 
         return rng, Ybar, info
@@ -138,12 +140,12 @@ class MBDPI:
         with tqdm(range(self.args.Ndiffuse - 1, 0, -1), desc="Diffusing") as pbar:
             for i in pbar:
                 t0 = time.time()
-                rng, Yi, rews = self.reverse_once(
+                rng, Yi, info = self.reverse_once(
                     state, rng, Yi, self.sigmas[i] * jnp.ones(self.args.Hnode + 1)
                 )
                 Yi.block_until_ready()
                 freq = 1 / (time.time() - t0)
-                pbar.set_postfix({"rew": f"{rews.mean():.2e}", "freq": f"{freq:.2f}"})
+                pbar.set_postfix({"rew": f"{info['rews'].mean():.2e}", "freq": f"{freq:.2f}"})
         return Yi
 
     @functools.partial(jax.jit, static_argnums=(0,))
@@ -169,10 +171,11 @@ def save_trajectory_data(args: Args, rewss, pipeline_statess, us, state_init, en
     print("Saving trajectory data to Zarr format...")
     
     # Create output directory
-    os.makedirs(args.data_output_dir, exist_ok=True)
+    data_output_dir = f"../results/{args.env_name}"
+    os.makedirs(data_output_dir, exist_ok=True)
     
     # Create Zarr file
-    zarr_file_path = os.path.join(args.data_output_dir, f"mbd_trajectories_{time.strftime('%Y%m%d_%H%M%S')}.zarr")
+    zarr_file_path = os.path.join(data_output_dir, f"mbd_trajectories_{time.strftime('%Y%m%d_%H%M%S')}.zarr")
     
     try:
         zroot = zarr.open_group(zarr_file_path, "w")
@@ -389,10 +392,10 @@ def main(args: Args):
     webpage = html.render(env.sys.tree_replace({"opt.timestep": env.dt}), rollout)
 
     # Save visualization to file for easy access
-    os.makedirs("./results", exist_ok=True)
-    with open("./results/car_env_diffusion_rollout.html", "w") as f:
+    os.makedirs("../results", exist_ok=True)
+    with open("../results/car_env/diffusion_rollout.html", "w") as f:
         f.write(webpage)
-    print("Visualization saved to ./results/car_env_diffusion_rollout.html")
+    print("Visualization saved to ../results/car_env/diffusion_rollout.html")
 
 
 
