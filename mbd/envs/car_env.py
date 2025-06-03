@@ -23,36 +23,6 @@ def normalize_angle(angle):
 
 
 @jax.jit
-def safe_quat_to_euler(quat):
-    """Safe quaternion to euler conversion that avoids CUDA cusolver errors."""
-    # Normalize quaternion to avoid numerical issues
-    quat_normalized = quat / jnp.linalg.norm(quat)
-    
-    # Extract quaternion components (w, x, y, z)
-    w, x, y, z = quat_normalized[3], quat_normalized[0], quat_normalized[1], quat_normalized[2]
-    
-    # Convert to Euler angles (roll, pitch, yaw) 
-    # Using a numerically stable implementation
-    # Roll (x-axis rotation)
-    sinr_cosp = 2 * (w * x + y * z)
-    cosr_cosp = 1 - 2 * (x * x + y * y)
-    roll = jnp.arctan2(sinr_cosp, cosr_cosp)
-    
-    # Pitch (y-axis rotation)
-    sinp = 2 * (w * y - z * x)
-    # Clamp to avoid numerical issues with arcsin
-    sinp = jnp.clip(sinp, -1.0, 1.0)
-    pitch = jnp.arcsin(sinp)
-    
-    # Yaw (z-axis rotation)
-    siny_cosp = 2 * (w * z + x * y)
-    cosy_cosp = 1 - 2 * (y * y + z * z)
-    yaw = jnp.arctan2(siny_cosp, cosy_cosp)
-    
-    return roll, pitch, yaw
-
-
-@jax.jit
 def oriented_rectangle_to_circle_distance(rect_center_xy, rect_half_extents, rect_angle, circle_center_xy, circle_radius):
     """
     Compute minimum distance between an oriented rectangle and a circle in 2D.
@@ -96,6 +66,7 @@ def oriented_rectangle_to_circle_distance(rect_center_xy, rect_half_extents, rec
     return distance_rect_to_circle_surface
 
 
+
 class CarEnv(PipelineEnv):
     def __init__(self, backend: str = "generalized",
                  n_frames: int = 5,
@@ -106,9 +77,10 @@ class CarEnv(PipelineEnv):
         sys = mjcf.load(xml_path)
         print(f"[CarEnv Debug] Parsed link_names: {list(sys.link_names)}")
         # print(f'system dt: {sys.dt}')
-        self.init_q = jnp.array([0.0, -0.7, 0.0]) # Initial position [x, y, z_angle]
-        self.target_q_xy = jnp.array([0.0, 1.2])     # Target XY position
-        self.target_q_rot_z = jnp.array([jnp.pi/2]) # Target Z rotation (example: 90 degrees)
+        self.init_q = jnp.array([0.0, -1.2, 0.0]) # Initial position [x, y, z_angle]
+
+        self.target_q_xy = jnp.array([0.0, 1.25])     # Target XY position
+        self.target_q_rot_z = jnp.array([0.0]) # Target Z rotation (example: 90 degrees)
 
         # Exact box dimensions from XML (half-extents)
         # Car: size="0.225 0.1 0.025" -> half_extents = [0.225, 0.1]
@@ -122,6 +94,8 @@ class CarEnv(PipelineEnv):
             [-0.7, 0.7],
             [0.7, -0.7],
             [-0.7, -0.7],
+            [0.7, 0.0],
+            [-0.7, 0.0],
         ])
 
         super().__init__(sys=sys, backend=backend, n_frames=n_frames)
@@ -129,10 +103,21 @@ class CarEnv(PipelineEnv):
     def reset(self, rng: jnp.ndarray) -> State:
         """Resets the environment to an initial state."""
         q = jnp.zeros(self.sys.nq).at[:3].set(self.init_q)
+        # randomize q_x and q_rot
+        # Split RNG for randomization
+        rng_x, rng_rot = jax.random.split(rng)
+        
+        # Randomize initial position and rotation
+        random_x = jax.random.uniform(rng_x, (), minval=-0.3, maxval=0.3)
+        random_rot = jax.random.uniform(rng_rot, (), minval=-0.7, maxval=0.7)
+        
+        q = q.at[0].set(random_x)     # Random x position
+        q = q.at[1].set(-1.2)         # Fixed y position from init_q
+        q = q.at[2].set(random_rot)   # Random rotation        # Set rotation to 0.7
         qd = jnp.zeros(self.sys.qd_size())
         # reset vy to 3
-        qd = qd.at[1].set(1)
-        qd = qd.at[2].set(1)
+        # qd = qd.at[1].set(1)
+        # qd = qd.at[2].set(1)
 
         pipeline_state = self.pipeline_init(q, qd)
         obs = self._get_obs(pipeline_state)
@@ -145,7 +130,7 @@ class CarEnv(PipelineEnv):
     def step(self, state: State, action: jnp.ndarray) -> State:
         """Run one timestep of the environment's dynamics."""
         # jax.debug.print("[DEBUG] step: action={}, state.pipeline_state.qd={}", action, state.pipeline_state.qd)
-        pipeline_state = self.pipeline_step(state.pipeline_state, action)
+        pipeline_state = self.pipeline_step(state.pipeline_state, action*jnp.array([0.5, 3.0, 3.0]))
         # jax.debug.print("[DEBUG] step: action={}, pipeline_state.qd={}", action, pipeline_state.qd)
         obs = self._get_obs(pipeline_state)
         reward = self._get_reward(pipeline_state, action)
@@ -165,10 +150,10 @@ class CarEnv(PipelineEnv):
         car_joint_qd = pipeline_state.qd[:3]   # [vx_local, vy_local, wz_local]
 
         # Car's global pose
-        car_global_pos_xy = pipeline_state.x.pos[0, :2]
+        car_global_pos_xy = pipeline_state.x.pos[0,:2]
         # Car's global orientation (Z-axis Euler angle)
         car_global_rot_quat = pipeline_state.x.rot[0]
-        _, _, car_global_euler_z = safe_quat_to_euler(car_global_rot_quat)
+        car_global_euler_z = pipeline_state.q[2]
 
         # Relative position to target
         rel_pos_to_target_xy = self.target_q_xy - car_global_pos_xy
@@ -193,9 +178,9 @@ class CarEnv(PipelineEnv):
 
     def _get_reward(self, pipeline_state: pipeline.State, applied_motor_action: jnp.ndarray) -> jnp.ndarray:
         """Calculates the reward for the current state and action."""
-        car_global_pos_xy = pipeline_state.x.pos[0, :2]
-        car_global_rot_quat = pipeline_state.x.rot[0]
-        _, _, car_global_euler_z = safe_quat_to_euler(car_global_rot_quat)
+        car_global_pos_xy = pipeline_state.x.pos[0,:2]
+
+        car_global_euler_z = pipeline_state.q[2]
 
         # JAX-compatible debug: Print inputs without conditional logic
         # jax.debug.print("[DEBUG] reward inputs: car_pos={}, car_rot={}", 
@@ -203,12 +188,12 @@ class CarEnv(PipelineEnv):
 
         # 1. Target Proximity Reward (dense reward)
         dist_to_target_xy = jnp.linalg.norm(self.target_q_xy - car_global_pos_xy)
+        # clip dist_to_target_xy to be at least 0.1
         reward_target_dist = -dist_to_target_xy
 
         # 2. Target Orientation Reward (dense reward) - using vectorized normalize_angle
-        target_rot_z_norm = normalize_angle(self.target_q_rot_z[0])
-        car_rot_z_norm = normalize_angle(car_global_euler_z)
-        diff_rot_z = normalize_angle(target_rot_z_norm - car_rot_z_norm)
+
+        diff_rot_z = normalize_angle(self.target_q_rot_z[0] - car_global_euler_z)
         reward_target_orient = -jnp.abs(diff_rot_z)
 
         # JAX-compatible debug: Print target rewards
@@ -219,7 +204,7 @@ class CarEnv(PipelineEnv):
         # Use pre-computed obstacle positions instead of recreating array
         
         # 4. Target Velocity Reward (dense reward)
-        velocity_reward = -jnp.sum(jnp.abs(pipeline_state.qd[-1]))
+        velocity_reward = -jnp.sum(jnp.abs(pipeline_state.qd[:2]))
 
         # Calculate distances to all obstacles - vectorized with vmap
         distances_to_obstacles = jax.vmap(
@@ -231,12 +216,7 @@ class CarEnv(PipelineEnv):
         
         # Find the minimum distance to any obstacle
         min_distance_to_obstacles = jnp.min(distances_to_obstacles)
-        
-
-        proximity_penalty_scale = -50.0  # Penalty scale for being near obstacles
-        safety_margin = 0.3  # Start applying penalty when closer than this distance
-        
-
+        safety_margin = 0.10  # Start applying penalty when closer than this distance
         
         # Apply proximity penalty for being near obstacle
         obstacle_penalty = -jnp.power(jax.nn.relu(safety_margin - min_distance_to_obstacles), 2)
@@ -244,41 +224,43 @@ class CarEnv(PipelineEnv):
 
 
         # 4. Control Cost - vectorized
-        ctrl_cost = -0.1 * jnp.sum(jnp.square(applied_motor_action))
+        ctrl_cost = -0.1 * jnp.sum(jnp.square(applied_motor_action[:2]))
 
-        # 5. Survival Reward
-        reward_alive = 0.1
+        # 5. Goal Reaching Reward
+        orient_to_target_ok = jnp.abs(diff_rot_z) < TARGET_REACHED_THRESHOLD_ORI
+        reached_target = (dist_to_target_xy < TARGET_REACHED_THRESHOLD_POS) & orient_to_target_ok
+        reward_goal_reached = 30.0 * reached_target
 
         # JAX-compatible debug: Print reward components
         # jax.debug.print("[DEBUG] reward components: obstacle_penalty={}, ctrl_cost={}", 
         #                penalty_obstacle, ctrl_cost)
 
         total_reward = (
-            10.0 * reward_target_dist +      # Weight for distance
-            10.0 * reward_target_orient +    # Weight for orientation
-            60.0 * obstacle_penalty +        # Weight for obstacle penalty
-            10.0 * velocity_reward +          # Weight for velocity reward
+            2.0 * reward_target_dist +      # Weight for distance
+            0.0 * reward_target_orient +    # Weight for orientation
+            20.0 * obstacle_penalty +        # Weight for obstacle penalty
+            1.0 * velocity_reward +          # Weight for velocity reward
             1.0 * ctrl_cost +                # Weight for control cost
-            reward_alive
+            reward_goal_reached
         )
         
         # JAX-compatible debug: Print final reward
         # jax.debug.print("[DEBUG] total_reward: {}", obstacle_penalty)
-        # jax.debug.print("target_dist: {reward_target_dist:.2f}, target_orient: {reward_target_orient:.2f}, obstacle_penalty: {obstacle_penalty:.2f}, velocity_reward: {velocity_reward:.2f}, ctrl_cost: {ctrl_cost:.2f}, reward_alive: {reward_alive:.2f}",
+        # jax.debug.print("target_dist: {reward_target_dist:.2f}, target_orient: {reward_target_orient:.2f}, obstacle_penalty: {obstacle_penalty:.2f}, velocity_reward: {velocity_reward:.2f}, ctrl_cost: {ctrl_cost:.2f}, goal_reaching{reward_goal_reached:.2f}",
         #                 reward_target_dist=reward_target_dist,
         #                 reward_target_orient=reward_target_orient, 
         #                 obstacle_penalty=obstacle_penalty,
         #                 velocity_reward=velocity_reward,
         #                 ctrl_cost=ctrl_cost,
-        #                 reward_alive=reward_alive)
+        #                 reward_goal_reached=reward_goal_reached)
 
         return total_reward.astype(jnp.float32)
 
     def _get_done(self, pipeline_state: pipeline.State) -> jnp.ndarray:
         """Checks if the episode is done."""
-        car_global_pos_xy = pipeline_state.x.pos[0, :2]
+        car_global_pos_xy = pipeline_state.x.pos[0,:2]
         car_global_rot_quat = pipeline_state.x.rot[0]
-        _, _, car_global_euler_z = safe_quat_to_euler(car_global_rot_quat)
+        car_global_euler_z = pipeline_state.q[2]
 
         # 1. Reached Target - using vectorized normalize_angle
         dist_to_target_xy = jnp.linalg.norm(self.target_q_xy - car_global_pos_xy)
@@ -291,7 +273,7 @@ class CarEnv(PipelineEnv):
         # 2. Obstacle Collision using rectangle-to-circle distance
         # Use pre-computed obstacle positions instead of recreating array
         
-        # Calculate distances to all obstacles - vectorized with vmap
+        # # Calculate distances to all obstacles - vectorized with vmap
         distances_to_obstacles = jax.vmap(
             lambda obstacle_center: oriented_rectangle_to_circle_distance(
                 car_global_pos_xy, self.car_half_extents, car_global_euler_z,
@@ -307,6 +289,7 @@ class CarEnv(PipelineEnv):
         out_of_bounds = jnp.any(jnp.abs(car_global_pos_xy) > jnp.array([WORLD_BOUND_X, WORLD_BOUND_Y]))
         
         done = reached_target | collided_obstacle | out_of_bounds
+        
         
         # JAX-compatible debug: Print done condition
         # jax.debug.print("[DEBUG] done condition: target={}, collision={}, bounds={}, final={}", 
@@ -333,18 +316,18 @@ def main():
     # env_step = env.step
     # env_reset = env.reset
 
-
-    state = env_reset(rng)
+    rng_env,rng = jax.random.split(rng)
+    state = env_reset(rng_env)
     rollout = [state.pipeline_state]
     print(f"Initial obs: {state.obs}")
     print(f"Initial reward: {state.reward}")
     print(f"Step 0: Obs: {state.obs}, Reward: {state.reward:.2f}, Done: {state.done}")
     # print qd
     jax.debug.print("[DEBUG] initial qd: {}", state.pipeline_state.qd)
-    for i in range(5): # Increased steps for testing
+    for i in range(50): # Increased steps for testing
         rng, rng_act = jax.random.split(rng)
         # Random actions for now to test dynamics
-        act = jnp.ones(env.action_size) * jnp.array([0, 1.0, 1.0])
+        act = jnp.array([0, 1.0, 0.0])
 
         state = env_step(state, act)
         rollout.append(state.pipeline_state)
@@ -353,6 +336,7 @@ def main():
         if state.done:
             print(f"Episode finished at step {i+1}. Reward: {state.reward:.2f}, Done: {state.done}")
             break
+        # import pdb; pdb.set_trace()
     
     if not state.done:
         print(f"Episode did not finish after {len(rollout)-1} steps.")
