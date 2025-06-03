@@ -170,9 +170,6 @@ class CarEnv(PipelineEnv):
             jnp.array([rel_rot_to_target_z]) # 1
         ])
         
-        # JAX-compatible debug: Print observations without conditional logic
-        # jax.debug.print("[DEBUG] observations: car_pos={}, car_rot={}, obs_shape={}", 
-        #                car_global_pos_xy, car_global_euler_z, obs.shape)
 
         return obs
 
