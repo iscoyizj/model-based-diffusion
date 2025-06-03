@@ -10,7 +10,7 @@
         <!-- Car's initial position is (0,0) on XY plane, with its base at z=0.025 -->
         <body name="car" pos="0.0 0.0 0.025">
             <!-- Car geom: L=0.4, W=0.2, H=0.05 centered at body origin -->
-            <geom name="car_geom" type="box" size="0.225 0.1 0.025" rgba="0 0.8 0 1" mass="1.0"/>
+            <geom name="car_geom" type="box" size="0.225 0.1 0.025" rgba="0 0.8 0 1" mass="1.0" contype="1" conaffinity="0"/>
             <!-- Joints for planar movement and rotation -->
             <joint name="car_x" type="slide" axis="1 0 0" limited="true" range="-2 2" damping="0.01"/>
             <joint name="car_y" type="slide" axis="0 1 0" limited="true" range="-2 2" damping="0.01"/>
@@ -24,15 +24,20 @@
         </body>
 
         <body name="obstacle2" pos="-0.7 0.7 0.025">
-            <geom name="obs2_geom" type="sphere" size="0.45" rgba="0.6 0.3 0.1 1" />
+            <geom name="obs2_geom" type="sphere" size="0.50" rgba="0.6 0.3 0.1 1" contype="0" conaffinity="1"/>
         </body>
         <body name="obstacle3" pos="0.7 -0.7 0.025">
-            <geom name="obs3_geom" type="sphere" size="0.45" rgba="0.6 0.3 0.1 1" />
+            <geom name="obs3_geom" type="sphere" size="0.50" rgba="0.6 0.3 0.1 1" contype="0" conaffinity="1"/>
         </body>
         <body name="obstacle4" pos="-0.7 -0.7 0.025">
-            <geom name="obs4_geom" type="sphere" size="0.45" rgba="0.6 0.3 0.1 1" />
+            <geom name="obs4_geom" type="sphere" size="0.55" rgba="0.6 0.3 0.1 1" contype="0" conaffinity="1"/>
         </body>
-
+        <body name="obstacle5" pos="0.7 0.0 0.025">
+            <geom name="obs5_geom" type="sphere" size="0.55" rgba="0.6 0.3 0.1 1" contype="0" conaffinity="1"/>
+        </body>
+        <body name="obstacle6" pos="-0.7 0.0 0.025">
+            <geom name="obs6_geom" type="sphere" size="0.55" rgba="0.6 0.3 0.1 1" contype="0" conaffinity="1"/>
+        </body>
     </worldbody>
 
     <actuator>
@@ -40,7 +45,7 @@
         <!-- kv is velocity gain (D), gear scales control signal, kp is implicitly set via joint stiffness if needed -->
         <velocity name="car_motor_x" joint="car_x" ctrlrange="-2 2" gear="1"  kv="1" />
         <velocity name="car_motor_y" joint="car_y" ctrlrange="-10 10" gear="2" kv="1" />
-        <velocity name="car_motor_rz" joint="car_z_rot" ctrlrange="-5 5" gear="1" kv="1" />
+        <velocity name="car_motor_rz" joint="car_z_rot" ctrlrange="-10 10" gear="1" kv="1" />
     </actuator>
 
 </mujoco> 
