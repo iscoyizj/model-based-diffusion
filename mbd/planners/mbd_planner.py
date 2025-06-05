@@ -54,12 +54,16 @@ def run_diffusion(args: Args):
     Ndiffuse_recommend = {
         "pushT": 200,
         "humanoidrun": 300,
+        "car_env": 10,
     }
     Nsample_recommend = {
         "humanoidrun": 8192,
     }
     Hsample_recommend = {
         "pushT": 40,
+    }
+    Hsample_recommend = {
+        "car_env": 60,
     }
     if not args.disable_recommended_params:
         args.temp_sample = temp_recommend.get(args.env_name, args.temp_sample)
@@ -109,6 +113,10 @@ def run_diffusion(args: Args):
         rewss, qs = jax.vmap(rollout_us, in_axes=(None, 0))(state_init, Y0s)
         rews = rewss.mean(axis=-1)
         rew_std = rews.std()
+        # debug check if any nan
+        jax.debug.print("[DEBUG] rews nan: {}", jnp.isnan(rews).any())
+        jax.debug.print("[DEBUG] qs nan: {}", jnp.isnan(qs.x.pos).any())
+
         rew_std = jnp.where(rew_std < 1e-4, 1.0, rew_std)
         rew_mean = rews.mean()
         logp0 = (rews - rew_mean) / rew_std / args.temp_sample
@@ -144,6 +152,7 @@ def run_diffusion(args: Args):
                 (i, rng, Yi), rew = reverse_once(carry_once, None)
                 Ybars.append(Yi)
                 # Update the progress bar's suffix to show the current reward
+                # jax.debug.print("[DEBUG] state: {state.pipeline_state.x.pos[0, :2]}")
                 pbar.set_postfix({"rew": f"{rew:.2e}"})
         return jnp.array(Ybars)
 

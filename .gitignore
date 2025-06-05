@@ -178,3 +178,4 @@ results/
 *.pt
 
 .vscode/
+mbd/MJDATA.TXT

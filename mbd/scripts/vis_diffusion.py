@@ -3,6 +3,7 @@ from jax import numpy as jnp
 from brax.io import html
 from brax.io.html import render_from_json
 from brax.io.json import _to_dict, _GEOM_TYPE_NAMES
+from brax.io.json import dumps as dumps_json
 import json
 import numpy as np
 from jax.tree_util import tree_map
@@ -13,13 +14,14 @@ import mbd
 
 jax.config.update("jax_platform_name", "cpu")
 
-env_name = "humanoidtrack"
+env_name = "pushT"
 env = mbd.envs.get_env(env_name)
 step_env_jit = jax.jit(env.step)
-Hsample = 50
+Hsample = 40
 plot_interval = 10
 path = f"{mbd.__path__[0]}/../results/{env_name}"
 mu_0ts = jnp.load(f"{path}/mu_0ts.npy")
+print(mu_0ts.shape)
 rng = jax.random.PRNGKey(0)
 mu_0_random = jax.random.normal(rng, (Hsample, env.action_size))
 mu_0ts = jnp.concatenate([mu_0_random[None], mu_0ts], axis=0)
@@ -63,6 +65,7 @@ def dumps(sys, statess) -> str:
                 geom_new = geom.copy()
                 if "world" in name:
                     geom_new["link_idx"] = -1
+                    # world_
                 elif "goal" in name:
                     geom_new["rgba"] = [0.0, 1.0, 0.0, 1.0]
                 elif "_ref" in name:
@@ -89,6 +92,7 @@ def dumps(sys, statess) -> str:
         for states in statess:
             states_new = []
             for i, state in enumerate(states):
+                # import pdb; pdb.set_trace()
                 pipeline_state = state
                 pipeline_state = pipeline_state.replace(
                     x=pipeline_state.x.replace(
@@ -105,9 +109,10 @@ def dumps(sys, statess) -> str:
     for state in statess[-1]:
         states = jax.tree.map(lambda x: jnp.concat([x] * traj_len), state)
         statess_list.append(states)
-    statess = jax.tree.map(lambda *x: jnp.stack(x), *statess_list)
-    statess = _to_dict(statess)
-    d["states"] = {k: statess[k] for k in ["x"]}
+    # statess = jax.tree.map(lambda *x: jnp.stack(x), *statess_list)
+    # import pdb; pdb.set_trace()
+    d["states"] = {'x': [_to_dict(states.x) for states in statess_list]}
+
 
     return json.dumps(d)
 
@@ -119,6 +124,7 @@ def render_us(state, us):
         rollout.append(state.pipeline_state)
         state = step_env_jit(state, us[i])
         rew_sum += state.reward
+    print(rew_sum)
     return rollout
 
 
@@ -137,7 +143,23 @@ else:
     with open(f"{path}/rollouts.pkl", "wb") as f:
         pickle.dump(rollouts, f)
     print("saved rollouts")
-json_file = dumps(env.sys.replace(dt=env.dt), rollouts)
+for i in range(50):
+    # import pdb; pdb.set_trace()
+    html_file2 = html.render(env.sys.tree_replace({'opt.timestep': env.dt}), rollouts[-i-1])
+    json_file2 = dumps_json(env.sys.tree_replace({'opt.timestep': env.dt}), rollouts[-i-1])
+    html_file2 = render_from_json(json_file2, height=500, colab=False, base_url=None)
+    with open(f"{path}/render_diffusion2_{i}.html", "w") as f:
+        f.write(html_file2)
+json_file = dumps(env.sys.tree_replace({'opt.timestep': env.dt}), rollouts)
 html_file = render_from_json(json_file, height=500, colab=False, base_url=None)
+# check the data_structure of different json
+data = json.loads(json_file)
+data_2 = json.loads(json_file2)
+
+import pdb; pdb.set_trace()
+# print(html_file)
+# import pdb; pdb.set_trace()
 with open(f"{path}/render_diffusion.html", "w") as f:
     f.write(html_file)
+# save 50 rollouts
+
