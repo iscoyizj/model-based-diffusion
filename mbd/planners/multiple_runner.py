@@ -135,9 +135,9 @@ def run_single_episode(args: Args, env, mbdpi, rng):
     
     # Run diffusion steps
     Ybars = []
-    with tqdm(range(args.Ndiffuse - 1, 0, -1), desc="Diffusing") as pbar:
+    with tqdm(range(args.Ndiffuse), desc="Diffusing") as pbar:
         for i in pbar:
-            rng, Y0, info = mbdpi.reverse_once(state_init, rng, Y0, mbdpi.sigma_control)
+            rng, Y0, info = mbdpi.reverse_once(state_init, rng, Y0, mbdpi.sigma_control* (args.traj_diffuse_factor ** i))
             Ybars.append(Y0)
             pbar.set_postfix({"rew": f"{info['rews'].mean():.2e}"})
     
@@ -169,7 +169,7 @@ def main():
     rng = jax.random.PRNGKey(args.seed)
     
     # Number of episodes to run
-    num_episodes = 50  # You can adjust this number
+    num_episodes = 150  # You can adjust this number
     
     print(f"Starting {num_episodes} episodes of data collection...")
     

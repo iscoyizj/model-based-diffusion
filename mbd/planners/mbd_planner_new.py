@@ -42,17 +42,17 @@ class Args:
     # env
     env_name: str = "car_env"
     # diffusion
-    Nsample: int = 2048  # number of samples
+    Nsample: int = 4096  # number of samples
     Hsample: int = 60  # horizon of samples
-    Hnode: int = 8  # node number for control
-    Ndiffuse: int = 9  # number of diffusion steps
+    Hnode: int = 10  # node number for control
+    Ndiffuse: int = 8  # number of diffusion steps
     temp_sample: float = 0.1  # temperature for sampling
-    horizon_diffuse_factor: float = 0.9  # factor to scale the sigma of horizon diffuse
-    traj_diffuse_factor: float = 0.5  # factor to scale the sigma of trajectory diffuse
+    horizon_diffuse_factor: float = 0.97  # factor to scale the sigma of horizon diffuse
+    traj_diffuse_factor: float = 0.6  # factor to scale the sigma of trajectory diffuse
     # data saving
     save_data: bool = True  # whether to save trajectory data
     data_output_dir: str = "../results/"+env_name  # directory to save data
-    max_trajectories_to_save: int = 800  # maximum number of best trajectories to save
+    max_trajectories_to_save: int = 50  # maximum number of best trajectories to save
 
 class MBDPI:
     def __init__(self, args: Args, env):
@@ -163,7 +163,7 @@ class MBDPI:
         return Y
 
 
-def save_trajectory_data(args: Args, rewss, pipeline_statess, us, state_init, env):
+def save_trajectory_data(args: Args, rewss, pipeline_statess, us, obs, state_init, env):
     """Save trajectory data to Zarr format, similar to PPO data collection."""
     if not args.save_data:
         return
@@ -200,40 +200,21 @@ def save_trajectory_data(args: Args, rewss, pipeline_statess, us, state_init, en
         # Extract best trajectories
         best_rewss = rewss[best_indices]  # Shape: (num_best, Hsample)
         best_us = us[best_indices]  # Shape: (num_best, Hsample, action_dim)
-        
+        best_obs = obs[best_indices]  # Shape: (num_best, Hsample, obs_dim)
         # Extract pipeline states for best trajectories
         def extract_best_pipeline_states(x):
             return x[best_indices]
         best_pipeline_statess = tree_util.tree_map(extract_best_pipeline_states, pipeline_statess)
         
-        # Convert to observations for each trajectory
-        best_obs_list = []
-        for traj_idx in range(len(best_indices)):
-            # Extract single trajectory pipeline states
-            def extract_single_trajectory(x):
-                return x[traj_idx]
-            single_traj_states = tree_util.tree_map(extract_single_trajectory, best_pipeline_statess)
-            
-            # Convert each timestep to observation
-            traj_obs = []
-            for t in range(single_traj_states.q.shape[0]):
-                def extract_timestep(x):
-                    return x[t]
-                timestep_state = tree_util.tree_map(extract_timestep, single_traj_states)
-                obs = env._get_obs(timestep_state)
-                traj_obs.append(obs)
-            
-            best_obs_list.append(jnp.stack(traj_obs))  # Shape: (Hsample, obs_dim)
         
-        best_obs_array = jnp.stack(best_obs_list)  # Shape: (num_best, Hsample, obs_dim)
         
         # Flatten data for storage (similar to PPO approach)
         # Reshape from (num_traj, horizon, dim) to (num_traj * horizon, dim)
-        num_best_trajectories = best_obs_array.shape[0]
-        horizon = best_obs_array.shape[1]
+        num_best_trajectories = best_obs.shape[0]
+        horizon = best_obs.shape[1]
         total_steps = num_best_trajectories * horizon
         
-        flat_obs = best_obs_array.reshape(total_steps, obs_dim)
+        flat_obs = best_obs.reshape(total_steps, obs_dim)
         flat_actions = best_us.reshape(total_steps, action_dim)
         flat_rewards = best_rewss.reshape(total_steps)
         
@@ -296,9 +277,9 @@ def main(args: Args):
     
     Y0 = YN
     Ybars = []
-    with tqdm(range(args.Ndiffuse - 1, 0, -1), desc="Diffusing") as pbar:
+    with tqdm(range(args.Ndiffuse), desc="Diffusing") as pbar:
         for i in pbar:
-            rng, Y0, info = mbdpi.reverse_once(state_init, rng, Y0, mbdpi.sigma_control)
+            rng, Y0, info = mbdpi.reverse_once(state_init, rng, Y0, mbdpi.sigma_control* (args.traj_diffuse_factor ** i))
             Ybars.append(Y0)
             # Update the progress bar's suffix to show the current reward
             pbar.set_postfix({"rew": f"{info['rews'].mean():.2e}"})
@@ -333,7 +314,7 @@ def main(args: Args):
     import flask
 
     # esitimate mu_0tm1
-    rewss, pipeline_statess = mbdpi.rollout_us_vmap(state_init, us)
+    rewss, pipeline_statess, obs = mbdpi.rollout_us_vmap(state_init, us)
     
     print(f"After rollout - Rewards shape: {rewss.shape}, Expected: ({args.Nsample + 1}, {args.Hsample})")
     print(f"After rollout - Pipeline states q shape: {pipeline_statess.q.shape}")
@@ -347,7 +328,7 @@ def main(args: Args):
         print(f"Environment terminates at step: {jnp.argmax(first_traj_done) if jnp.any(first_traj_done) else 'Never'}")
     
     # Save trajectory data to Zarr
-    save_trajectory_data(args, rewss, pipeline_statess, us, state_init, env)
+    save_trajectory_data(args, rewss, pipeline_statess, us, obs, state_init, env)
     
     # Select the best trajectory for visualization
     # rewss shape: (Nsample+1, Hsample)

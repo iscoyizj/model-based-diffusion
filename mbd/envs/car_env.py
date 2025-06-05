@@ -79,7 +79,7 @@ class CarEnv(PipelineEnv):
         # print(f'system dt: {sys.dt}')
         self.init_q = jnp.array([0.0, -1.2, 0.0]) # Initial position [x, y, z_angle]
 
-        self.target_q_xy = jnp.array([0.0, 1.25])     # Target XY position
+        self.target_q_xy = jnp.array([0.0, 1.30])     # Target XY position
         self.target_q_rot_z = jnp.array([0.0]) # Target Z rotation (example: 90 degrees)
 
         # Exact box dimensions from XML (half-extents)
@@ -109,15 +109,16 @@ class CarEnv(PipelineEnv):
         
         # Randomize initial position and rotation
         random_x = jax.random.uniform(rng_x, (), minval=-0.3, maxval=0.3)
-        random_rot = jax.random.uniform(rng_rot, (), minval=-0.7, maxval=0.7)
+        random_rot = jax.random.uniform(rng_rot, (), minval=-0.3, maxval=0.3)
         
         q = q.at[0].set(random_x)     # Random x position
-        q = q.at[1].set(-1.2)         # Fixed y position from init_q
+        q = q.at[1].set(-1.35)         # Fixed y position from init_q
         q = q.at[2].set(random_rot)   # Random rotation        # Set rotation to 0.7
         qd = jnp.zeros(self.sys.qd_size())
         # reset vy to 3
         # qd = qd.at[1].set(1)
         # qd = qd.at[2].set(1)
+        # check collision here if the initial pos is too close to the 
 
         pipeline_state = self.pipeline_init(q, qd)
         obs = self._get_obs(pipeline_state)
@@ -166,7 +167,7 @@ class CarEnv(PipelineEnv):
         obs = jnp.concatenate([
             car_joint_q,              # 3 (local pose)
             car_joint_qd,             # 3 (local velocities)
-            rel_pos_to_target_xy,     # 2
+            rel_pos_to_target_xy,     # 2   
             jnp.array([rel_rot_to_target_z]) # 1
         ])
         
